@@ -7,7 +7,9 @@ import {
 } from '@heroicons/react/24/outline';
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// 1. Tipagem para o estado de dados, substituindo o 'any'
+// 1. Inicialização usando a chave do seu .env (sem espaços!)
+const genAI = new GoogleGenerativeAI(import.meta.env.VITE_GEMINI_API_KEY);
+
 interface DadosFinanceiros {
   fat: number;
   gastos: number;
@@ -24,59 +26,65 @@ export default function Consultoria() {
   }, []);
 
   async function carregarDadosEAnalisar() {
-    // Nota: Se a base crescer muito, ideal é fazer essa soma direto no Supabase (RPC)
-    const { data: vendas } = await supabase.from('vendas').select('valor_total');
-    const { data: fin } = await supabase.from('financeiro').select('*');
-    
-    const fat = vendas?.reduce((acc, v) => acc + Number(v.valor_total), 0) || 0;
-    const gastos = fin?.filter(f => f.tipo === 'pagar').reduce((acc, f) => acc + Number(f.valor), 0) || 0;
-    const lucro = fat - gastos;
+    try {
+      // Puxamos do 'financeiro' pois é onde seus testes estão aparecendo
+      const { data: fin, error } = await supabase.from('financeiro').select('*');
+      
+      if (error) throw error;
 
-    setDados({ fat, gastos, lucro });
-    solicitarAnaliseIA(fat, gastos, lucro);
+      // Lógica baseada no seu print: Valores positivos = Faturamento | Negativos = Gastos
+      const fat = fin?.filter(f => Number(f.valor) > 0).reduce((acc, f) => acc + Number(f.valor), 0) || 0;
+      const gastos = fin?.filter(f => Number(f.valor) < 0).reduce((acc, f) => acc + Math.abs(Number(f.valor)), 0) || 0;
+      const lucro = fat - gastos;
+
+      setDados({ fat, gastos, lucro });
+
+      // Só chama a IA se houver dados para não gastar cota a toa
+      if (fat !== 0 || gastos !== 0) {
+        await solicitarAnaliseIA(fat, gastos, lucro);
+      } else {
+        setAnaliseIA("Aguardando lançamentos financeiros para iniciar a consultoria...");
+      }
+    } catch (error) {
+      console.error("Erro ao carregar dados:", error);
+    }
   }
 
   async function solicitarAnaliseIA(fat: number, gastos: number, lucro: number) {
-    console.log("Minha chave é:", import.meta.env.VITE_GEMINI_API_KEY);
     setCarregandoIA(true);
-    setAnaliseIA(""); // Limpa para o efeito de "digitação" iniciar do zero
+    setAnaliseIA(""); 
     
     try {
-      // 2. Usando a variável de ambiente segura do Vite
-      const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-
-      if (!apiKey) {
-        throw new Error("Chave de API não encontrada no arquivo .env");
-      }
-
-      // O .trim() é a mágica aqui: ele corta qualquer espaço ou quebra de linha acidental!
-      const genAI = new GoogleGenerativeAI(apiKey.trim());
-      const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+      // Usando o modelo 2.0 Flash conforme conversamos
+      const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
       
-      const prompt = `
-        Aja como um consultor financeiro sênior da Sense Audio. 
-        Analise: Faturamento R$ ${fat}, Gastos R$ ${gastos}, Lucro R$ ${lucro}.
-        Dê 3 dicas curtas e motivadoras para 2026.
-      `;
+      const prompt = `Aja como consultor sênior da Sense Audio. 
+      Analise estes números: Faturamento R$ ${fat}, Gastos R$ ${gastos}, Lucro R$ ${lucro}. 
+      Dê 3 dicas curtas e motivadoras para 2026.`;
 
       const result = await model.generateContent(prompt);
       const text = result.response.text();
       
-      // 3. Efeito de Digitação corrigido
-      let i = 0;
-      const interval = setInterval(() => {
-        setAnaliseIA((prev) => prev + text.charAt(i));
-        i++;
-        if (i >= text.length) {
-          clearInterval(interval);
-          setCarregandoIA(false); // Agora o loading só desativa quando termina de digitar!
+      let index = 0;
+      const typing = setInterval(() => {
+        setAnaliseIA(text.substring(0, index));
+        index++;
+        
+        if (index > text.length) {
+          clearInterval(typing);
+          setCarregandoIA(false);
         }
-      }, 15); // Velocidade da digitação
+      }, 15);
 
-    } catch (error) {
-      console.error("Erro na consultoria:", error);
-      setAnaliseIA("Não consegui acessar minha base de consultoria. Verifique sua chave de API ou conexão.");
-      setCarregandoIA(false); // Garante que o loading saia mesmo se der erro
+    } catch (error: any) {
+      console.error("ERRO API:", error);
+      // Tratamento para o erro 429 (Cota) que apareceu no seu console
+      if (error.status === 429) {
+        setAnaliseIA("Muitas consultas seguidas! Aguarde 1 minuto para o Gemini processar novamente.");
+      } else {
+        setAnaliseIA("Não consegui conectar com o consultor. Verifique a chave no .env.");
+      }
+      setCarregandoIA(false);
     }
   }
 
@@ -92,38 +100,45 @@ export default function Consultoria() {
       </header>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {/* Lado Esquerdo: Cards de Dados */}
+        {/* Cards com os valores dos seus testes */}
         <div className="space-y-6">
-          <div className="bg-darker p-6 rounded-[30px] border border-secondary/10">
-            <p className="text-secondary text-[10px] font-black uppercase mb-1">Faturamento Bruto</p>
-            <p className="text-2xl font-black">R$ {dados?.fat.toLocaleString('pt-BR')}</p>
+          <div className="bg-darker p-8 rounded-[35px] border border-secondary/10 shadow-2xl">
+            <p className="text-secondary text-[10px] font-black uppercase mb-1 tracking-widest">Faturamento Teste</p>
+            <p className="text-3xl font-black text-white">R$ {dados?.fat.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
           </div>
-          <div className="bg-primary/10 p-6 rounded-[30px] border border-primary/20">
-            <p className="text-primary text-[10px] font-black uppercase mb-1">Resultado Final</p>
-            <p className="text-3xl font-black text-primary">R$ {dados?.lucro.toLocaleString('pt-BR')}</p>
+          <div className="bg-primary/10 p-8 rounded-[35px] border border-primary/20 shadow-xl">
+            <p className="text-primary text-[10px] font-black uppercase mb-1 tracking-widest">Lucro Real</p>
+            <p className="text-4xl font-black text-primary">R$ {dados?.lucro.toLocaleString('pt-BR', { minimumFractionDigits: 2 })}</p>
           </div>
+          <button 
+            onClick={() => carregarDadosEAnalisar()}
+            className="w-full py-4 bg-dark border border-secondary/20 rounded-2xl text-[10px] font-black uppercase tracking-widest hover:border-primary transition-all flex items-center justify-center gap-2"
+          >
+            <ArrowPathIcon className={`h-4 w-4 ${carregandoIA ? 'animate-spin' : ''}`} />
+            Recalcular Consultoria
+          </button>
         </div>
 
-        {/* Lado Direito: IA com efeito de digitação */}
+        {/* Diagnóstico da IA */}
         <div className="lg:col-span-2">
-          <div className="bg-darker border border-primary/30 rounded-[40px] p-10 relative overflow-hidden shadow-2xl min-h-[400px]">
+          <div className="bg-darker border border-primary/30 rounded-[40px] p-10 relative overflow-hidden shadow-2xl min-h-[450px]">
             <div className="flex items-center gap-3 mb-8">
               <div className="bg-primary p-2 rounded-lg animate-pulse">
                 <SparklesIcon className="h-6 w-6 text-darker" />
               </div>
-              <h3 className="text-xl font-bold">Análise Estratégica do <span className="text-primary">Gemini</span></h3>
+              <h3 className="text-xl font-bold italic tracking-tight">Insight do <span className="text-primary not-italic">Consultor Gemini 2.0</span></h3>
             </div>
 
             {carregandoIA && !analiseIA ? (
               <div className="flex flex-col items-center justify-center py-20">
-                <ArrowPathIcon className="h-10 w-10 text-primary animate-spin mb-4" />
-                <p className="text-secondary italic">Consultor Gemini está processando...</p>
+                <ArrowPathIcon className="h-12 w-12 text-primary animate-spin mb-4" />
+                <p className="text-secondary italic">Analisando lançamentos da Sense Audio...</p>
               </div>
             ) : (
               <div className="prose prose-invert max-w-none">
-                <p className="text-gray-200 leading-relaxed whitespace-pre-line italic text-lg">
+                <p className="text-gray-200 leading-relaxed whitespace-pre-line italic text-lg font-light border-l-2 border-primary/20 pl-6">
                   {analiseIA}
-                  {carregandoIA && <span className="inline-block w-2 h-5 ml-1 bg-primary animate-pulse">|</span>}
+                  {carregandoIA && <span className="inline-block w-1.5 h-6 ml-1 bg-primary animate-ping"></span>}
                 </p>
               </div>
             )}
